@@ -16,10 +16,30 @@ npm install
 
 ```
 MAIN_WALLET_PRIVATE_KEY=your_private_key_in_base58_format
-RPC_ENDPOINT=https://api.devnet.solana.com
+RPC_ENDPOINT=https://api.mainnet-beta.solana.com
 ```
 
 **Not:** Özel anahtarınızı Base58 formatında belirtmeniz gerekiyor. Phantom gibi bir cüzdan kullanıyorsanız, özel anahtarı dışa aktarabilir ve bu formatta kullanabilirsiniz.
+
+## Solana Ağ Seçimi
+
+Bu script varsayılan olarak Solana mainnet üzerinde çalışacak şekilde ayarlanmıştır. Eğer testnet veya devnet üzerinde test etmek isterseniz, `.env` dosyasında `RPC_ENDPOINT` değerini şu şekilde değiştirebilirsiniz:
+
+- Mainnet: `RPC_ENDPOINT=https://api.mainnet-beta.solana.com`
+- Devnet: `RPC_ENDPOINT=https://api.devnet.solana.com`
+- Testnet: `RPC_ENDPOINT=https://api.testnet.solana.com`
+
+**Önemli:** Devnet veya testnet üzerinde test ederken, ücretsiz test SOL almak için `get-devnet-sol.js` scriptini çalıştırabilirsiniz:
+
+```bash
+node get-devnet-sol.js
+```
+
+Mainnet üzerinde çalışmak için ana cüzdanınızda gerçek SOL olması gerektiğini unutmayın. Mainnet durumunu kontrol etmek için:
+
+```bash
+node mainnet-info.js
+```
 
 ## Kullanım
 
@@ -40,6 +60,39 @@ node index.js create 5
 node index.js create 3 --prefix test
 ```
 
+**Yeni:** Artık cüzdan oluştururken mevcut cüzdanları silmek veya tutmak isteyip istemediğiniz sorulacaktır.
+
+### Cüzdan İçe Aktarma (Import)
+
+Harici bir JSON dosyasından cüzdanları içe aktarabilirsiniz. JSON dosyası aşağıdaki formatta bir dizi cüzdan içermelidir:
+
+```json
+[
+  {
+    "name": "wallet1",
+    "publicKey": "cüzdan_public_key",
+    "privateKey": "cüzdan_private_key_base58"
+  },
+  {
+    "name": "wallet2",
+    "publicKey": "cüzdan_public_key",
+    "privateKey": "cüzdan_private_key_base58"
+  }
+]
+```
+
+İçe aktarma komutu:
+
+```bash
+# Cüzdanları içe aktar
+node index.js import <dosya_yolu>
+
+# Aynı isme veya public key'e sahip cüzdanları üzerine yazarak içe aktar
+node index.js import <dosya_yolu> --overwrite
+```
+
+İçe aktarma sırasında da mevcut cüzdanları tutmak veya silmek isteyip istemediğiniz sorulacaktır.
+
 ### Cüzdanları Listeleme
 
 ```bash
@@ -55,6 +108,12 @@ node index.js balance
 # Belirli cüzdanların SOL bakiyelerini göster (1. ve 3. cüzdan)
 node index.js balance --wallets 1,3
 
+# Belirli bir aralıktaki cüzdanların bakiyelerini göster (1'den 10'a kadar)
+node index.js balance --wallets 1-10
+
+# Karma bir şekilde belirtilen cüzdanların bakiyelerini göster (1, 3 ve 5'ten 10'a kadar)
+node index.js balance --wallets 1,3,5-10
+
 # Tüm cüzdanların belirli bir SPL token bakiyesini göster
 node index.js balance --token <token_adresi>
 ```
@@ -67,6 +126,12 @@ node index.js send-sol 0.1
 
 # Sadece 2. ve 4. cüzdanlara 0.05 SOL gönder
 node index.js send-sol 0.05 --wallets 2,4
+
+# 1'den 10'a kadar olan cüzdanlara 0.01 SOL gönder
+node index.js send-sol 0.01 --wallets 1-10
+
+# Karma belirtilen cüzdanlara SOL gönder
+node index.js send-sol 0.02 --wallets 1,3,5-10,15
 ```
 
 ### SPL Token Gönderme
@@ -77,25 +142,31 @@ node index.js send-token <token_adresi> 10
 
 # Sadece 1., 3. ve 5. cüzdanlara 5 token gönder
 node index.js send-token <token_adresi> 5 --wallets 1,3,5
+
+# 1'den 5'e kadar olan cüzdanlara 10 token gönder
+node index.js send-token <token_adresi> 10 --wallets 1-5
 ```
 
 ### Tek İşlemde Çoklu Gönderim (Send-to-All)
 
 ```bash
-# Tüm cüzdanlara tek işlemde 0.1 SOL gönder
+# Tüm cüzdanlara 0.1 SOL gönder
 node index.js send-to-all-sol 0.1
 
-# Sadece 2. ve 4. cüzdanlara tek işlemde 0.05 SOL gönder
+# Sadece 2. ve 4. cüzdanlara 0.05 SOL gönder
 node index.js send-to-all-sol 0.05 --wallets 2,4
 
-# Tüm cüzdanlara tek işlemde 10 token gönder
+# 1'den 20'ye kadar olan cüzdanlara 0.01 SOL gönder
+node index.js send-to-all-sol 0.01 --wallets 1-20
+
+# Tüm cüzdanlara 10 token gönder
 node index.js send-to-all-token <token_adresi> 10
 
-# Sadece 1., 3. ve 5. cüzdanlara tek işlemde 5 token gönder
+# Sadece 1., 3. ve 5. cüzdanlara 5 token gönder
 node index.js send-to-all-token <token_adresi> 5 --wallets 1,3,5
 ```
 
-**Not:** Send-to-all komutları tüm transferleri tek bir işlemde gerçekleştirir, bu da gas ücretlerinden tasarruf sağlar. Ancak, çok sayıda cüzdan için işlem boyutu sınırlamaları nedeniyle hata alabilirsiniz. Bu durumda daha az cüzdana gönderim yapmayı deneyin veya normal send komutlarını kullanın.
+**Not:** `send-to-all` komutları artık işlemleri otomatik olarak daha küçük gruplara (batch) bölerek gerçekleştirir. Bu, Solana'nın işlem boyutu sınırlamalarına uygun şekilde çalışır. SOL transferleri için her grupta maksimum 10 cüzdan, SPL token transferleri için her grupta maksimum 5 cüzdan kullanılır. Bu sayede "Transaction too large" hatası önlenir ve çok sayıda cüzdana sorunsuz şekilde gönderim yapılabilir.
 
 ### SOL Toplama
 
@@ -105,6 +176,9 @@ node index.js collect-sol
 
 # Sadece 2. ve 3. cüzdanlardan SOL'leri topla
 node index.js collect-sol --wallets 2,3
+
+# 5'ten 15'e kadar olan cüzdanlardan SOL'leri topla
+node index.js collect-sol --wallets 5-15
 
 # Tüm cüzdanlardan SOL'leri topla, her cüzdanda 0.01 SOL bırak
 node index.js collect-sol --leave 0.01
@@ -118,6 +192,9 @@ node index.js collect-token <token_adresi>
 
 # Sadece 1. ve 4. cüzdanlardan token'ları topla
 node index.js collect-token <token_adresi> --wallets 1,4
+
+# 10'dan 30'a kadar olan cüzdanlardan token'ları topla
+node index.js collect-token <token_adresi> --wallets 10-30
 ```
 
 ## Güvenlik Notları
@@ -129,6 +206,8 @@ node index.js collect-token <token_adresi> --wallets 1,4
 ## Özellikler
 
 - ✅ İstediğiniz kadar yeni Solana cüzdanı oluşturma
+- ✅ Mevcut cüzdanları silme veya üzerine ekleme seçeneği
+- ✅ Harici bir dosyadan cüzdanları içe aktarma
 - ✅ Tüm cüzdanları veya seçilen cüzdanları listeleme
 - ✅ Cüzdan bakiyelerini kontrol etme (SOL ve SPL token)
 - ✅ Ana cüzdandan seçilen cüzdanlara SOL transfer etme

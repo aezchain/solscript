@@ -7,6 +7,7 @@ import path from 'path';
 import bs58 from 'bs58';
 import { program } from 'commander';
 import dotenv from 'dotenv';
+import readline from 'readline';
 
 dotenv.config();
 
@@ -92,10 +93,44 @@ function createWallet(name) {
   return wallet;
 }
 
+// Create readline interface for user input
+function createReadlineInterface() {
+  return readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+}
+
+// Ask a yes/no question and return a promise with the answer
+function askYesNoQuestion(question) {
+  const rl = createReadlineInterface();
+  
+  return new Promise((resolve) => {
+    rl.question(`${question} (y/n): `, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes');
+    });
+  });
+}
+
 // Create multiple wallets
-async function createWallets(count, prefix = 'wallet') {
-  const createdWallets = [];
+async function createWallets(count, options) {
+  const prefix = options.prefix || 'wallet';
   const wallets = loadWallets();
+  
+  // If there are existing wallets, ask whether to keep them
+  if (wallets.length > 0) {
+    console.log(`Found ${wallets.length} existing wallets.`);
+    const keepExisting = await askYesNoQuestion('Do you want to keep existing wallets?');
+    
+    if (!keepExisting) {
+      console.log('Deleting existing wallets...');
+      fs.writeFileSync(WALLETS_FILE, JSON.stringify([], null, 2));
+      return createWallets(count, options); // Restart with empty wallet list
+    }
+  }
+  
+  const createdWallets = [];
   const existingCount = wallets.length;
   
   console.log(`Creating ${count} wallets...`);
@@ -112,6 +147,86 @@ async function createWallets(count, prefix = 'wallet') {
   
   console.log(`Created ${createdWallets.length} wallets.`);
   return createdWallets;
+}
+
+// Import wallets from a JSON file
+async function importWallets(filePath, options) {
+  try {
+    // Read the file
+    const fileData = fs.readFileSync(filePath, 'utf8');
+    const importedWallets = JSON.parse(fileData);
+    
+    if (!Array.isArray(importedWallets)) {
+      console.error('Invalid wallet file format. Expected an array of wallet objects.');
+      return;
+    }
+    
+    // Validate wallet data
+    const validWallets = importedWallets.filter(wallet => {
+      if (!wallet.name || !wallet.publicKey || !wallet.privateKey) {
+        console.error(`Skipping invalid wallet: ${JSON.stringify(wallet)}`);
+        return false;
+      }
+      return true;
+    });
+    
+    if (validWallets.length === 0) {
+      console.error('No valid wallets found in the import file.');
+      return;
+    }
+    
+    // Load existing wallets
+    const existingWallets = loadWallets();
+    
+    // If there are existing wallets, ask whether to keep them
+    if (existingWallets.length > 0) {
+      console.log(`Found ${existingWallets.length} existing wallets.`);
+      const keepExisting = await askYesNoQuestion('Do you want to keep existing wallets?');
+      
+      if (!keepExisting) {
+        console.log('Replacing existing wallets with imported wallets...');
+        saveWallets(validWallets);
+        console.log(`Imported ${validWallets.length} wallets.`);
+        return;
+      }
+    }
+    
+    // Merge wallets, checking for duplicates
+    const mergedWallets = [...existingWallets];
+    let importCount = 0;
+    
+    for (const wallet of validWallets) {
+      // Check if wallet with same name or public key already exists
+      const duplicateNameIndex = mergedWallets.findIndex(w => w.name === wallet.name);
+      const duplicateKeyIndex = mergedWallets.findIndex(w => w.publicKey === wallet.publicKey);
+      
+      if (duplicateNameIndex !== -1) {
+        if (options.overwrite) {
+          console.log(`Overwriting wallet with name: ${wallet.name}`);
+          mergedWallets[duplicateNameIndex] = wallet;
+          importCount++;
+        } else {
+          console.error(`Skipping wallet with duplicate name: ${wallet.name}`);
+        }
+      } else if (duplicateKeyIndex !== -1) {
+        if (options.overwrite) {
+          console.log(`Overwriting wallet with public key: ${wallet.publicKey}`);
+          mergedWallets[duplicateKeyIndex] = wallet;
+          importCount++;
+        } else {
+          console.error(`Skipping wallet with duplicate public key: ${wallet.publicKey}`);
+        }
+      } else {
+        mergedWallets.push(wallet);
+        importCount++;
+      }
+    }
+    
+    saveWallets(mergedWallets);
+    console.log(`Imported ${importCount} wallets. Total wallets: ${mergedWallets.length}`);
+  } catch (error) {
+    console.error(`Error importing wallets: ${error.message}`);
+  }
 }
 
 // List all wallets
@@ -447,39 +562,55 @@ async function sendSolToAll(amount, walletIndices = []) {
   
   const amountLamports = amount * LAMPORTS_PER_SOL;
   
-  console.log(`Sending ${amount} SOL to ${targetWallets.length} wallets in a single transaction...`);
+  // Solana transaction size limits require we split into batches
+  // Each transfer instruction is roughly 96 bytes, and max transaction size is ~1232 bytes
+  // Conservative batch size to avoid transaction too large errors
+  const MAX_WALLETS_PER_TX = 10;
+  const walletBatches = [];
   
-  try {
-    const transaction = new Transaction();
-    
-    for (const wallet of targetWallets) {
-      const receiverPublicKey = new PublicKey(wallet.publicKey);
-      
-      transaction.add(
-        SystemProgram.transfer({
-          fromPubkey: mainWallet.publicKey,
-          toPubkey: receiverPublicKey,
-          lamports: amountLamports,
-        })
-      );
-    }
-    
-    const signature = await sendAndConfirmTransaction(
-      connection,
-      transaction,
-      [mainWallet]
-    );
-    
-    console.log(`Sent ${amount} SOL to ${targetWallets.length} wallets in a single transaction`);
-    console.log(`Transaction signature: ${signature}`);
-    
-    // Log each recipient
-    targetWallets.forEach(wallet => {
-      console.log(`  - ${wallet.name} (${wallet.publicKey})`);
-    });
-  } catch (error) {
-    console.error(`Error sending SOL to multiple wallets: ${error.message}`);
+  for (let i = 0; i < targetWallets.length; i += MAX_WALLETS_PER_TX) {
+    walletBatches.push(targetWallets.slice(i, i + MAX_WALLETS_PER_TX));
   }
+  
+  console.log(`Sending ${amount} SOL to ${targetWallets.length} wallets in ${walletBatches.length} transactions...`);
+  
+  for (let batchIndex = 0; batchIndex < walletBatches.length; batchIndex++) {
+    const walletBatch = walletBatches[batchIndex];
+    
+    try {
+      const transaction = new Transaction();
+      
+      for (const wallet of walletBatch) {
+        const receiverPublicKey = new PublicKey(wallet.publicKey);
+        
+        transaction.add(
+          SystemProgram.transfer({
+            fromPubkey: mainWallet.publicKey,
+            toPubkey: receiverPublicKey,
+            lamports: amountLamports,
+          })
+        );
+      }
+      
+      const signature = await sendAndConfirmTransaction(
+        connection,
+        transaction,
+        [mainWallet]
+      );
+      
+      console.log(`Batch ${batchIndex + 1}/${walletBatches.length}: Sent ${amount} SOL to ${walletBatch.length} wallets`);
+      console.log(`Transaction signature: ${signature}`);
+      
+      // Log each recipient in this batch
+      walletBatch.forEach(wallet => {
+        console.log(`  - ${wallet.name} (${wallet.publicKey})`);
+      });
+    } catch (error) {
+      console.error(`Error sending SOL to batch ${batchIndex + 1}: ${error.message}`);
+    }
+  }
+  
+  console.log(`Completed sending ${amount} SOL to wallets.`);
 }
 
 // Send SPL token to multiple wallets in a single transaction
@@ -511,61 +642,104 @@ async function sendTokenToAll(tokenAddress, amount, walletIndices = []) {
     mainWallet.publicKey
   );
   
-  console.log(`Sending ${amount} tokens to ${targetWallets.length} wallets in a single transaction...`);
+  // Solana transaction size limits require we split into batches
+  // SPL token transfers are larger than SOL transfers, so use a smaller batch size
+  const MAX_WALLETS_PER_TX = 5;
+  const walletBatches = [];
   
-  try {
-    const transaction = new Transaction();
-    const destinationAccounts = [];
+  for (let i = 0; i < targetWallets.length; i += MAX_WALLETS_PER_TX) {
+    walletBatches.push(targetWallets.slice(i, i + MAX_WALLETS_PER_TX));
+  }
+  
+  console.log(`Sending ${amount} tokens to ${targetWallets.length} wallets in ${walletBatches.length} transactions...`);
+  
+  for (let batchIndex = 0; batchIndex < walletBatches.length; batchIndex++) {
+    const walletBatch = walletBatches[batchIndex];
     
-    // First, ensure all destination accounts exist
-    for (const wallet of targetWallets) {
-      const receiverPublicKey = new PublicKey(wallet.publicKey);
+    try {
+      const transaction = new Transaction();
+      const destinationAccounts = [];
       
-      // Get or create the destination token account
-      const destinationTokenAccount = await getOrCreateAssociatedTokenAccount(
-        connection,
-        mainWallet,
-        tokenPublicKey,
-        receiverPublicKey
-      );
-      
-      destinationAccounts.push({
-        wallet,
-        tokenAccount: destinationTokenAccount.address
-      });
-    }
-    
-    // Then add all transfers to the transaction
-    for (const { wallet, tokenAccount } of destinationAccounts) {
-      transaction.add(
-        transfer(
+      // First, ensure all destination accounts exist
+      for (const wallet of walletBatch) {
+        const receiverPublicKey = new PublicKey(wallet.publicKey);
+        
+        // Get or create the destination token account
+        const destinationTokenAccount = await getOrCreateAssociatedTokenAccount(
           connection,
           mainWallet,
-          sourceTokenAccount.address,
-          tokenAccount,
-          mainWallet,
-          amount * (10 ** 9) // Assuming 9 decimals, adjust as needed
-        )
+          tokenPublicKey,
+          receiverPublicKey
+        );
+        
+        destinationAccounts.push({
+          wallet,
+          tokenAccount: destinationTokenAccount.address
+        });
+      }
+      
+      // Then add all transfers to the transaction
+      for (const { wallet, tokenAccount } of destinationAccounts) {
+        transaction.add(
+          transfer(
+            connection,
+            mainWallet,
+            sourceTokenAccount.address,
+            tokenAccount,
+            mainWallet,
+            amount * (10 ** 9) // Assuming 9 decimals, adjust as needed
+          )
+        );
+      }
+      
+      const signature = await sendAndConfirmTransaction(
+        connection,
+        transaction,
+        [mainWallet]
       );
+      
+      console.log(`Batch ${batchIndex + 1}/${walletBatches.length}: Sent ${amount} tokens to ${walletBatch.length} wallets`);
+      console.log(`Transaction signature: ${signature}`);
+      
+      // Log each recipient in this batch
+      walletBatch.forEach(wallet => {
+        console.log(`  - ${wallet.name} (${wallet.publicKey})`);
+      });
+    } catch (error) {
+      console.error(`Error sending tokens to batch ${batchIndex + 1}: ${error.message}`);
     }
-    
-    const signature = await sendAndConfirmTransaction(
-      connection,
-      transaction,
-      [mainWallet]
-    );
-    
-    console.log(`Sent ${amount} tokens to ${targetWallets.length} wallets in a single transaction`);
-    console.log(`Transaction signature: ${signature}`);
-    
-    // Log each recipient
-    targetWallets.forEach(wallet => {
-      console.log(`  - ${wallet.name} (${wallet.publicKey})`);
-    });
-  } catch (error) {
-    console.error(`Error sending tokens to multiple wallets: ${error.message}`);
-    console.error('Note: If transaction is too large, try sending to fewer wallets at once');
   }
+  
+  console.log(`Completed sending ${amount} tokens to wallets.`);
+}
+
+// Utility function to parse wallet range or list
+function parseWalletIndices(walletRangeStr) {
+  if (!walletRangeStr) return [];
+  
+  const indices = [];
+  const parts = walletRangeStr.split(',');
+  
+  for (const part of parts) {
+    if (part.includes('-')) {
+      // Handle range like "1-5"
+      const [start, end] = part.split('-').map(num => parseInt(num.trim()));
+      if (!isNaN(start) && !isNaN(end)) {
+        for (let i = start; i <= end; i++) {
+          indices.push(i);
+        }
+      }
+    } else {
+      // Handle single index
+      const index = parseInt(part.trim());
+      if (!isNaN(index)) {
+        indices.push(index);
+      }
+    }
+  }
+  
+  // Remove duplicates and sort
+  return [...new Set(indices)].sort((a, b) => a - b);
 }
 
 // Command line interface
@@ -579,7 +753,9 @@ program
   .description('Create new wallets')
   .argument('<count>', 'Number of wallets to create', parseInt)
   .option('-p, --prefix <prefix>', 'Name prefix for wallets', 'wallet')
-  .action(createWallets);
+  .action((count, options) => {
+    createWallets(count, options);
+  });
 
 program
   .command('list')
@@ -589,19 +765,21 @@ program
 program
   .command('balance')
   .description('Show wallet balances')
-  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices', val => val.split(',').map(Number))
+  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices or ranges (e.g., "1,3,5-10")')
   .option('-t, --token <address>', 'SPL token address to check balance for')
   .action((options) => {
-    getWalletBalances(options.wallets, options.token);
+    const walletIndices = parseWalletIndices(options.wallets);
+    getWalletBalances(walletIndices, options.token);
   });
 
 program
   .command('send-sol')
   .description('Send SOL to wallets')
   .argument('<amount>', 'Amount of SOL to send to each wallet', parseFloat)
-  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices', val => val.split(',').map(Number))
+  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices or ranges (e.g., "1,3,5-10")')
   .action((amount, options) => {
-    sendSol(amount, options.wallets);
+    const walletIndices = parseWalletIndices(options.wallets);
+    sendSol(amount, walletIndices);
   });
 
 program
@@ -609,36 +787,40 @@ program
   .description('Send SPL tokens to wallets')
   .argument('<token>', 'SPL token address')
   .argument('<amount>', 'Amount of tokens to send to each wallet', parseFloat)
-  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices', val => val.split(',').map(Number))
+  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices or ranges (e.g., "1,3,5-10")')
   .action((token, amount, options) => {
-    sendToken(token, amount, options.wallets);
+    const walletIndices = parseWalletIndices(options.wallets);
+    sendToken(token, amount, walletIndices);
   });
 
 program
   .command('collect-sol')
   .description('Collect SOL from wallets back to main wallet')
-  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices', val => val.split(',').map(Number))
+  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices or ranges (e.g., "1,3,5-10")')
   .option('-l, --leave <amount>', 'Amount of SOL to leave in each wallet', parseFloat, 0)
   .action((options) => {
-    collectSol(options.wallets, options.leave);
+    const walletIndices = parseWalletIndices(options.wallets);
+    collectSol(walletIndices, options.leave);
   });
 
 program
   .command('collect-token')
   .description('Collect SPL tokens from wallets back to main wallet')
   .argument('<token>', 'SPL token address')
-  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices', val => val.split(',').map(Number))
+  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices or ranges (e.g., "1,3,5-10")')
   .action((token, options) => {
-    collectTokens(token, options.wallets);
+    const walletIndices = parseWalletIndices(options.wallets);
+    collectTokens(token, walletIndices);
   });
 
 program
   .command('send-to-all-sol')
   .description('Send SOL to multiple wallets in a single transaction')
   .argument('<amount>', 'Amount of SOL to send to each wallet', parseFloat)
-  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices', val => val.split(',').map(Number))
+  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices or ranges (e.g., "1,3,5-10")')
   .action((amount, options) => {
-    sendSolToAll(amount, options.wallets);
+    const walletIndices = parseWalletIndices(options.wallets);
+    sendSolToAll(amount, walletIndices);
   });
 
 program
@@ -646,9 +828,19 @@ program
   .description('Send SPL tokens to multiple wallets in a single transaction')
   .argument('<token>', 'SPL token address')
   .argument('<amount>', 'Amount of tokens to send to each wallet', parseFloat)
-  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices', val => val.split(',').map(Number))
+  .option('-w, --wallets <indices>', 'Comma-separated list of wallet indices or ranges (e.g., "1,3,5-10")')
   .action((token, amount, options) => {
-    sendTokenToAll(token, amount, options.wallets);
+    const walletIndices = parseWalletIndices(options.wallets);
+    sendTokenToAll(token, amount, walletIndices);
+  });
+
+program
+  .command('import')
+  .description('Import wallets from a JSON file')
+  .argument('<file>', 'Path to JSON file containing wallet data')
+  .option('-o, --overwrite', 'Overwrite wallets with duplicate names or public keys', false)
+  .action((file, options) => {
+    importWallets(file, options);
   });
 
 program.parse(process.argv); 
