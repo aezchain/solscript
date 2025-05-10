@@ -8,6 +8,7 @@ import bs58 from 'bs58';
 import { program } from 'commander';
 import dotenv from 'dotenv';
 import readline from 'readline';
+import { decode as base64Decode } from 'base64-arraybuffer';
 
 dotenv.config();
 
@@ -154,24 +155,112 @@ async function importWallets(filePath, options) {
   try {
     // Read the file
     const fileData = fs.readFileSync(filePath, 'utf8');
-    const importedWallets = JSON.parse(fileData);
+    let importedWallets = JSON.parse(fileData);
     
     if (!Array.isArray(importedWallets)) {
       console.error('Invalid wallet file format. Expected an array of wallet objects.');
       return;
     }
     
-    // Validate wallet data
-    const validWallets = importedWallets.filter(wallet => {
-      if (!wallet.name || !wallet.publicKey || !wallet.privateKey) {
-        console.error(`Skipping invalid wallet: ${JSON.stringify(wallet)}`);
-        return false;
-      }
-      return true;
-    });
+    // Detect format and process wallets accordingly
+    const processedWallets = [];
+    let format = "unknown";
     
-    if (validWallets.length === 0) {
-      console.error('No valid wallets found in the import file.');
+    // Try to detect format from first wallet
+    const sampleWallet = importedWallets[0] || {};
+    
+    if (sampleWallet.name && sampleWallet.publicKey && sampleWallet.privateKey) {
+      format = "standard"; // Our standard format with name, publicKey and privateKey (base58)
+    } else if (sampleWallet.publicKey && sampleWallet.privateKey) {
+      format = "keyonly"; // Format with just publicKey and privateKey (often base64) and possibly mnemonic
+    }
+    
+    console.log(`Detected wallet format: ${format}`);
+    
+    // Process wallets based on format
+    for (let i = 0; i < importedWallets.length; i++) {
+      const wallet = importedWallets[i];
+      let processedWallet = null;
+      
+      if (format === "standard") {
+        // Standard format (already has name, publicKey, privateKey in base58)
+        if (!wallet.name || !wallet.publicKey || !wallet.privateKey) {
+          console.error(`Skipping invalid wallet at index ${i}: missing required fields`);
+          continue;
+        }
+        
+        processedWallet = {
+          name: wallet.name,
+          publicKey: wallet.publicKey,
+          privateKey: wallet.privateKey // Already in base58
+        };
+      } else if (format === "keyonly") {
+        // Format with just keys, may have base64 privateKey
+        if (!wallet.publicKey || !wallet.privateKey) {
+          console.error(`Skipping invalid wallet at index ${i}: missing required fields`);
+          continue;
+        }
+        
+        // Generate name if not provided
+        const name = wallet.name || `imported_wallet${i + 1}`;
+        
+        // Convert privateKey from base64 to base58 if needed
+        let privateKeyBase58 = wallet.privateKey;
+        
+        // Check if the privateKey is in base64 format
+        if (wallet.privateKey.includes('+') || wallet.privateKey.includes('/') || wallet.privateKey.includes('=')) {
+          try {
+            // Convert from base64 to Uint8Array
+            const privateKeyArrayBuffer = base64Decode(wallet.privateKey);
+            const privateKeyUint8Array = new Uint8Array(privateKeyArrayBuffer);
+            
+            // Convert to base58
+            privateKeyBase58 = bs58.encode(privateKeyUint8Array);
+          } catch (error) {
+            console.error(`Error converting privateKey for wallet ${i + 1}: ${error.message}`);
+            console.error('Trying to use the privateKey as is...');
+          }
+        }
+        
+        processedWallet = {
+          name,
+          publicKey: wallet.publicKey,
+          privateKey: privateKeyBase58
+        };
+      } else {
+        console.error(`Unknown wallet format for wallet at index ${i}`);
+        continue;
+      }
+      
+      // Verify the keypair is valid
+      try {
+        const privateKeyBuffer = bs58.decode(processedWallet.privateKey);
+        const keypair = Keypair.fromSecretKey(privateKeyBuffer);
+        
+        // Check if the public key matches
+        if (keypair.publicKey.toString() !== processedWallet.publicKey) {
+          console.warn(`Warning: Public key mismatch for wallet ${processedWallet.name}.`);
+          console.warn(`  File shows: ${processedWallet.publicKey}`);
+          console.warn(`  Derived: ${keypair.publicKey.toString()}`);
+          
+          // Use the derived public key if specified in options
+          if (options.fixPublicKeys) {
+            console.log(`  Fixing: Using derived public key for ${processedWallet.name}`);
+            processedWallet.publicKey = keypair.publicKey.toString();
+          } else {
+            console.warn(`  Skipping wallet. Use --fix-public-keys option to fix this.`);
+            continue;
+          }
+        }
+        
+        processedWallets.push(processedWallet);
+      } catch (error) {
+        console.error(`Invalid private key for wallet ${processedWallet.name}: ${error.message}`);
+      }
+    }
+    
+    if (processedWallets.length === 0) {
+      console.error('No valid wallets found or processed from the import file.');
       return;
     }
     
@@ -185,8 +274,8 @@ async function importWallets(filePath, options) {
       
       if (!keepExisting) {
         console.log('Replacing existing wallets with imported wallets...');
-        saveWallets(validWallets);
-        console.log(`Imported ${validWallets.length} wallets.`);
+        saveWallets(processedWallets);
+        console.log(`Imported ${processedWallets.length} wallets.`);
         return;
       }
     }
@@ -195,7 +284,7 @@ async function importWallets(filePath, options) {
     const mergedWallets = [...existingWallets];
     let importCount = 0;
     
-    for (const wallet of validWallets) {
+    for (const wallet of processedWallets) {
       // Check if wallet with same name or public key already exists
       const duplicateNameIndex = mergedWallets.findIndex(w => w.name === wallet.name);
       const duplicateKeyIndex = mergedWallets.findIndex(w => w.publicKey === wallet.publicKey);
@@ -839,6 +928,7 @@ program
   .description('Import wallets from a JSON file')
   .argument('<file>', 'Path to JSON file containing wallet data')
   .option('-o, --overwrite', 'Overwrite wallets with duplicate names or public keys', false)
+  .option('-f, --fix-public-keys', 'Fix public keys if they don\'t match the derived ones from the private key', false)
   .action((file, options) => {
     importWallets(file, options);
   });

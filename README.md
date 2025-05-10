@@ -64,7 +64,9 @@ node index.js create 3 --prefix test
 
 ### Cüzdan İçe Aktarma (Import)
 
-Harici bir JSON dosyasından cüzdanları içe aktarabilirsiniz. JSON dosyası aşağıdaki formatta bir dizi cüzdan içermelidir:
+Farklı formatlardaki JSON dosyalarından cüzdanları içe aktarabilirsiniz:
+
+#### 1. Standart Format
 
 ```json
 [
@@ -81,6 +83,23 @@ Harici bir JSON dosyasından cüzdanları içe aktarabilirsiniz. JSON dosyası a
 ]
 ```
 
+#### 2. Sadece Anahtar Format (Base64 privateKey)
+
+```json
+[
+  {
+    "publicKey": "4XNJU8JuauDHhBZmRQj13vUBQ8GrMECra2LNFZ2riLbL",
+    "privateKey": "Mds3xypsrqu7GqffGBSeTH0vCUr2F5gZUt+Wu3eM5Ck0WpIC9kNImpVtMSvaS8uECp0eXAP1ambFBOwFhRfBiw==",
+    "mnemonic": "venue promote problem until fine develop produce crouch renew feel account call"
+  }
+]
+```
+
+Bu formatta:
+- `name` alanı opsiyoneldir, belirtilmezse "imported_wallet1" gibi isimler atanır
+- `privateKey` base64 formatında olabilir (solana-keygen komutundan çıkan format)
+- `mnemonic` alanı opsiyoneldir ve işlenirken kullanılmaz
+
 İçe aktarma komutu:
 
 ```bash
@@ -89,6 +108,9 @@ node index.js import <dosya_yolu>
 
 # Aynı isme veya public key'e sahip cüzdanları üzerine yazarak içe aktar
 node index.js import <dosya_yolu> --overwrite
+
+# Public key doğrulaması hatası olan cüzdanların public key'lerini düzelt
+node index.js import <dosya_yolu> --fix-public-keys
 ```
 
 İçe aktarma sırasında da mevcut cüzdanları tutmak veya silmek isteyip istemediğiniz sorulacaktır.
